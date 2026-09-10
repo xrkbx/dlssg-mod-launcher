@@ -1,0 +1,20 @@
+# Runtime state and per-user data (never publish)
+launcher-state.json
+launcher.log
+console.txt
+
+# Backups of the user's game files
+backups/
+
+# Local DLSS DLL library (NVIDIA property, not redistributable)
+dll-library/
+
+# The downloaded mod package (belongs to sdli1995/dlssg_for_sm86; fetched at runtime)
+dlssg_for_sm86-main/
+dlssg_for_sm86-main.old_*/
+*.zip
+
+# Windows / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
