@@ -18,6 +18,7 @@ Built for RTX 20 and 30 series cards (Turing / Ampere) that do not have native D
 
 ## Features
 
+- **Frame Gen multiplier up to 6X** (2X / 3X / 4X / 5X / 6X), following the mod's current `dlssg_for_sm86` 0.3.x (310.9) build, where the game's own plugin supports it. RTX 20 series (Turing) is supported by the same mod build.
 - **Multi-launcher + all-drive scanning** with an optional deep scan and custom search folders.
 - **Engine-aware install-folder detection** (Unreal, Unity, RED/Cyberpunk-style, and a best-guess fallback) with a confidence rating and a confirm-or-override step before anything is written.
 - **One row per game**, even when a game splits its DLSS DLLs across separate `DLSS` and `Streamline` folders (common on Unreal Engine titles).

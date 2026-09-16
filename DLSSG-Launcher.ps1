@@ -24,7 +24,7 @@ $Script:LogFile    = Join-Path $Script:Root 'launcher.log'
 $Script:ModZipUrl  = 'https://codeload.github.com/sdli1995/dlssg_for_sm86/zip/refs/heads/main'
 
 # version.dll lives in the mod root, the rest in altnative\
-$Script:ProxyNames = @('version.dll', 'dxgi.dll', 'winmm.dll', 'dinput8.dll', 'winhttp.dll')
+$Script:ProxyNames = @('version.dll', 'dxgi.dll', 'd3d12.dll', 'dbghelp.dll', 'winmm.dll', 'dinput8.dll')
 $Script:IniName    = 'dlssg_sm86.ini'
 $Script:NgxOriginals = @('nvngx_dlssg.dll', 'nvngx_dlss.dll', 'nvngx_dlssd.dll')
 
@@ -761,6 +761,9 @@ function Get-OverrideName {
 function Get-ProxySourcePath {
     param([string]$ProxyName)
     if ($ProxyName -eq 'version.dll') { return (Join-Path $Script:ModSrc 'version.dll') }
+    # 0.3.x ships alternates in 'alternatives\'; older packages used 'altnative\'
+    $new = Join-Path $Script:ModSrc ('alternatives\{0}' -f $ProxyName)
+    if (Test-Path -LiteralPath $new) { return $new }
     return (Join-Path $Script:ModSrc ('altnative\{0}' -f $ProxyName))
 }
 
@@ -811,32 +814,42 @@ function Get-ModVersion {
 # ---------------------------------------------------------------- ini
 
 function New-ModIni {
-    param([string]$Router, [string]$KernelImage, [int]$HardwareBilinear, [int]$MaxGeneratedFrames, [int]$LogLevel)
+    # dlssg_for_sm86 0.3.x factory schema. RTX 20/30 auto-detect the kernel family,
+    # so Router/KernelImage are no longer written (they are advanced auto keys).
+    param([int]$Optimized, [int]$MaxGeneratedFrames, [string]$Preset, [int]$LogLevel)
     return @"
-; Native $(Get-ModVersion). Restart the game after changing this file.
+; DLSSG SM86 $(Get-ModVersion). Restart the game after changing this file.
 ; Written by DLSSG-Launcher.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-[Compatibility]
-; SM86 for Ampere; SM75 for Turing or SM75 forward-JIT testing.
-Router=$Router
-; PTX uses driver JIT. Cubin requires an exact GPU/Router match.
-; Auto selects Cubin on an exact match, otherwise PTX.
-KernelImage=$KernelImage
-; 0 = exact output (default); 1 = optional approximate sampling, SM86 only.
-HardwareBilinear=$HardwareBilinear
+[General]
+; 1 = frame generation on (bundled Ampere-optimized DLSS-G runtime); 0 = off.
+Enabled=1
 
 [FrameGeneration]
-; Capability limit: 1=2X, 2=3X, 3=4X. The game requests the actual multiplier.
+; 1 = optimized kernels (recommended, output bit-identical to stock); 0 = stock numerics.
+Optimized=$Optimized
+; Multiplier ceiling: 1=2X, 2=3X, 3=4X (default), 4=5X, 5=6X. 5/6X need the 310.9 build
+; and a game whose plugin supports Dynamic MFG. The game requests the actual count.
 MaxGeneratedFrames=$MaxGeneratedFrames
 
+[Compatibility]
+; DLSS-G UI recomposition preset (310.9 build). Auto = game/driver decides (default).
+; A = force off. B = force on (only where the game supplies a HUD-less image + UI plane).
+Preset=$Preset
+
 [Logging]
-; 0=off, 1=errors, 2=diagnostics, 3=verbose.
+; 0=off, 1=errors, 2=config/capability, 3=kernel/eval traces.
 Level=$LogLevel
+Directory=dlssg_sm86\logs
+
+[Runtime]
+Mode=Bundled
+CacheDirectory=
 "@
 }
 
 function Read-ModIni {
     param([string]$Path)
-    $vals = @{ Router = $Script:GpuRoute; KernelImage = 'PTX'; HardwareBilinear = 0; MaxGeneratedFrames = 3; Level = 1 }
+    $vals = @{ Optimized = 1; MaxGeneratedFrames = 3; Preset = 'Auto'; Level = 1 }
     if (-not (Test-Path -LiteralPath $Path)) { return $vals }
     foreach ($line in (Get-Content -LiteralPath $Path)) {
         if ($line -match '^\s*;') { continue }
@@ -1239,13 +1252,12 @@ function Install-Mod {
         Copy-Item -LiteralPath $src -Destination (Join-Path $modDir $Proxy) -Force
         Write-Log ('  wrote {0}' -f $Proxy)
 
-        $ini = New-ModIni -Router $IniValues.Router -KernelImage $IniValues.KernelImage `
-                          -HardwareBilinear $IniValues.HardwareBilinear `
-                          -MaxGeneratedFrames $IniValues.MaxGeneratedFrames -LogLevel $IniValues.Level
+        $ini = New-ModIni -Optimized $IniValues.Optimized -MaxGeneratedFrames $IniValues.MaxGeneratedFrames `
+                          -Preset $IniValues.Preset -LogLevel $IniValues.Level
         $ini | Set-Content -LiteralPath (Join-Path $modDir $Script:IniName) -Encoding ascii
-        Write-Log ('  wrote {0} (Router={1} Kernel={2} Bilinear={3} MaxFrames={4} Log={5})' -f `
-                   $Script:IniName, $IniValues.Router, $IniValues.KernelImage, $IniValues.HardwareBilinear, `
-                   $IniValues.MaxGeneratedFrames, $IniValues.Level)
+        $mult = @('2X','3X','4X','5X','6X')[[Math]::Min([Math]::Max($IniValues.MaxGeneratedFrames - 1, 0), 4)]
+        Write-Log ('  wrote {0} (up to {1}, Optimized={2}, Preset={3}, Log={4})' -f `
+                   $Script:IniName, $mult, $IniValues.Optimized, $IniValues.Preset, $IniValues.Level)
 
         $manifest = [ordered]@{
             game        = $Game.Name
@@ -1405,17 +1417,14 @@ function New-PanelCombo {
 [void](New-PanelLabel -Text 'Proxy DLL' -Y 28)
 $cboProxy = New-PanelCombo -Y 28 -Items $Script:ProxyNames
 
-[void](New-PanelLabel -Text 'Router' -Y 60)
-$cboRouter = New-PanelCombo -Y 60 -Items @('SM86', 'SM75')
+[void](New-PanelLabel -Text 'Max multiplier' -Y 60)
+$cboFrames = New-PanelCombo -Y 60 -Items @('1 - up to 2X', '2 - up to 3X', '3 - up to 4X (default)', '4 - up to 5X', '5 - up to 6X')
 
-[void](New-PanelLabel -Text 'Kernel image' -Y 92)
-$cboKernel = New-PanelCombo -Y 92 -Items @('PTX', 'Auto', 'Cubin')
+[void](New-PanelLabel -Text 'Kernels' -Y 92)
+$cboRouter = New-PanelCombo -Y 92 -Items @('1 - optimized (default)', '0 - stock')
 
-[void](New-PanelLabel -Text 'Sampling' -Y 124)
-$cboBilinear = New-PanelCombo -Y 124 -Items @('0 - exact (default)', '1 - approximate, faster')
-
-[void](New-PanelLabel -Text 'Max multiplier' -Y 156)
-$cboFrames = New-PanelCombo -Y 156 -Items @('1 - up to 2X', '2 - up to 3X', '3 - up to 4X')
+[void](New-PanelLabel -Text 'UI preset' -Y 124)
+$cboKernel = New-PanelCombo -Y 124 -Items @('Auto (default)', 'A - UI recomposition off', 'B - UI recomposition on')
 
 [void](New-PanelLabel -Text 'Logging' -Y 188)
 $cboLog = New-PanelCombo -Y 188 -Items @('0 - off', '1 - errors (default)', '2 - diagnostics', '3 - verbose')
@@ -1581,14 +1590,10 @@ function Update-DetailPanel {
     if ($cboProxy.Items.Count -gt 0) { $cboProxy.SelectedIndex = $pick }
 
     $ini = Read-ModIni -Path (Join-Path (Get-ModInstallDir -Game $g) $Script:IniName)
-    $cboRouter.SelectedItem = if ($Script:ProxyNames -and $ini.Router -eq 'SM75') { 'SM75' } else { $ini.Router }
-    if (-not $cboRouter.SelectedItem) { $cboRouter.SelectedItem = $Script:GpuRoute }
-    if (-not $cboRouter.SelectedItem) { $cboRouter.SelectedIndex = 0 }
-    $cboKernel.SelectedItem   = $ini.KernelImage
-    if (-not $cboKernel.SelectedItem) { $cboKernel.SelectedIndex = 0 }
-    $cboBilinear.SelectedIndex = [Math]::Min([Math]::Max($ini.HardwareBilinear, 0), 1)
-    $cboFrames.SelectedIndex   = [Math]::Min([Math]::Max($ini.MaxGeneratedFrames - 1, 0), 2)
-    $cboLog.SelectedIndex      = [Math]::Min([Math]::Max($ini.Level, 0), 3)
+    $cboFrames.SelectedIndex = [Math]::Min([Math]::Max($ini.MaxGeneratedFrames - 1, 0), 4)   # 2X..6X
+    $cboRouter.SelectedIndex = if ($ini.Optimized -eq 0) { 1 } else { 0 }                    # optimized / stock
+    $cboKernel.SelectedIndex = switch ("$($ini.Preset)".ToUpper()) { 'A' { 1 } 'B' { 2 } default { 0 } }
+    $cboLog.SelectedIndex    = [Math]::Min([Math]::Max($ini.Level, 0), 3)
 
     $exeName = if ($g.RenderExe) { Split-Path -Leaf $g.RenderExe } else { '(none found)' }
     $ngx     = if ($g.NgxFiles -and $g.NgxFiles.Count -gt 0) { ($g.NgxFiles -join ', ') } else { 'none' }
@@ -1632,11 +1637,11 @@ function Update-DetailPanel {
 }
 
 function Get-UiIniValues {
+    $preset = switch ($cboKernel.SelectedIndex) { 1 { 'A' } 2 { 'B' } default { 'Auto' } }
     return [ordered]@{
-        Router             = [string]$cboRouter.SelectedItem
-        KernelImage        = [string]$cboKernel.SelectedItem
-        HardwareBilinear   = [int]([string]$cboBilinear.SelectedItem).Substring(0, 1)
+        Optimized          = if ($cboRouter.SelectedIndex -eq 1) { 0 } else { 1 }
         MaxGeneratedFrames = [int]([string]$cboFrames.SelectedItem).Substring(0, 1)
+        Preset             = $preset
         Level              = [int]([string]$cboLog.SelectedItem).Substring(0, 1)
     }
 }
@@ -1844,8 +1849,9 @@ $btnInstall.Add_Click({
     $proxy = ($proxyText -split '\s+')[0]
 
     $vals = Get-UiIniValues
-    if ($Script:GpuRoute -in @('SM86', 'SM75') -and $vals.Router -ne $Script:GpuRoute) {
-        if (-not (Confirm-Action ("Router is set to {0} but your GPU is {1}.`n`nContinue anyway?" -f $vals.Router, $Script:GpuRoute) 'Router mismatch')) { return }
+    $multLabel = @('2X','3X','4X','5X','6X')[[Math]::Min([Math]::Max($vals.MaxGeneratedFrames - 1, 0), 4)]
+    if ($vals.MaxGeneratedFrames -ge 4 -and (Get-ModVersion) -notmatch '^0\.3') {
+        if (-not (Confirm-Action ("5X/6X needs the mod's 310.9 build (v0.3.x). Your package looks older, so this may fall back to 4X.`n`nUpdate the mod first (Update mod button), or continue anyway?") '6X needs 310.9')) { return }
     }
 
     # Work out where the proxy must go (next to the render exe) and let the user confirm
@@ -1858,8 +1864,8 @@ $btnInstall.Add_Click({
         default  { '' }
     }
     $dllNote = if ($info.Dir -ne $g.TargetDir) { "`n(DLSS DLLs stay in {0})" -f $g.TargetDir } else { '' }
-    $msg = ("Install folder (next to the render exe):`n{0}`n`nBased on: {1}   [{2}, {3} confidence]{4}{5}`n`nProxy: {6}   Router: {7}`nAnything overwritten is backed up first. Close the game.`n`nYes = install here    No = pick a different folder    Cancel = abort" -f `
-            $info.Dir, $exeName, $info.Engine, $info.Confidence, $dllNote, $warn, $proxy, $vals.Router)
+    $msg = ("Install folder (next to the render exe):`n{0}`n`nBased on: {1}   [{2}, {3} confidence]{4}{5}`n`nProxy: {6}   Frame Gen: up to {7}`nAnything overwritten is backed up first. Close the game.`n`nYes = install here    No = pick a different folder    Cancel = abort" -f `
+            $info.Dir, $exeName, $info.Engine, $info.Confidence, $dllNote, $warn, $proxy, $multLabel)
     $res = [System.Windows.Forms.MessageBox]::Show($msg, 'Confirm install folder', 'YesNoCancel', 'Question')
     if ($res -eq 'Cancel') { return }
     if ($res -eq 'No') {
